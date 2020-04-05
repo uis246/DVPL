@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <memory.h>
 
+#include <potato.h>
+
 #include <lz4.h>
 #include <lz4hc.h>
 
@@ -16,18 +18,11 @@
 __inline void unloadFile(void* ptr, size_t size){
     munmap(ptr, size);
 }
-struct footer{
-    uint32_t len;
-    uint32_t packed_len;
-    uint32_t crc32;
-    uint32_t pack_type;
-    char marker[4];
-};
 
 static struct argp_option options[] = {
     { "pack", 'p', "type", OPTION_ARG_OPTIONAL, "Pack DVPL"},
     { "unpack", 'u', 0, 0, "Unpack DVPL"},
-    { "verbose", 'v', 0, 0, "Verbose"},
+//    { "verbose", 'v', 0, 0, "Verbose"},
     { 0 }
 };
 static char doc[] = "DVPL (un)packer";
@@ -36,7 +31,7 @@ char* fname=0;
 static struct __attribute((packed)){
     bool pack;
     bool unpack;
-    bool verbose;
+//    bool verbose;
     __attribute((aligned(4))) int type;
 }args={false,false,false};
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
@@ -58,7 +53,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             break;
         }else
             return ARGP_ERR_UNKNOWN;
-        case 'v': args.verbose=true; break;
+//        case 'v': args.verbose=true; break;
         case ARGP_KEY_ARG:
             fname=arg;
             return 0;
@@ -69,7 +64,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 static struct argp argp = { options, parse_opt, args_doc, doc, 0, 0, 0 };
 
 
-uint32_t crc32b(unsigned char *message, size_t size) {
+/*uint32_t crc32b(unsigned char *message, size_t size) {
    int i, j;
    uint32_t byte, crc, mask;
 
@@ -83,7 +78,7 @@ uint32_t crc32b(unsigned char *message, size_t size) {
       }
    }
    return ~crc;
-}
+}*/
 
 
 int main(int argc, char* argv[])
@@ -92,7 +87,8 @@ int main(int argc, char* argv[])
 
     if(!(args.pack||args.unpack)){
         dprintf(2, "Specefy -p or -u\n");
-        abort();
+		argp_help(&argp, stderr, ARGP_HELP_SEE, argv[0]);
+		exit(0);
     }
 
     if(!fname){
@@ -108,13 +104,74 @@ int main(int argc, char* argv[])
     fseek(f, 0L, SEEK_END);
     size_t size = ftell(f);
 //    fseek(f, 0L, SEEK_SET);
-    if(f==NULL){abort();}
     char* p=mmap(NULL, size, PROT_READ, MAP_SHARED, fileno(f), 0);
-    fclose(f);
+	fclose(f);
 
+	size_t sz;
+	int fd2;
+	char* data;
+
+	if(args.unpack){
+		if((sz=dvpl_check(p, size))==0){
+			dprintf(2, "Bad DVPL\n");
+			abort();
+		}
+
+		data=strrchr(fname, '.');
+		if(data&&(fd2=strlen(fname))>5&&!strcmp(data, ".dvpl")){
+			fname[fd2-5]=0;
+		}else{
+			fname="orig";
+		}
+
+		if(!(fd2=open(fname, O_RDWR|O_CREAT, 0666))){
+			dprintf(2, "Fopen error\n");
+			abort();
+		}
+		ftruncate(fd2, sz);
+		if((data=mmap(NULL, sz, PROT_WRITE, MAP_SHARED|MAP_FILE, fd2, 0))==-1){
+			perror("Mmap");
+			abort();
+		}
+		if(dvpl_unpack(p, size, data)==LIBPOTATO_NOT_IMPLEMENTED){
+			dprintf(2, "Unsupported compression type\n");
+			abort();
+		}
+	}else{
+		char* fn;
+		{
+			size_t sz=strlen(fname);
+			fn=malloc(sz+6);
+			memcpy(fn, fname, sz);
+			memcpy(fn+sz, ".dvpl", 6);
+		}
+
+		if(!(fd2=open(fn, O_RDWR|O_CREAT, 0666))){
+			dprintf(2, "Fopen error\n");
+			abort();
+		}
+
+		sz=dvpl_pack_max(size, args.type);
+
+		ftruncate(fd2, sz);
+		if((data=mmap(NULL, sz, PROT_WRITE, MAP_SHARED|MAP_FILE, fd2, 0))==-1){
+			perror("Mmap");
+			abort();
+		}
+
+		if(dvpl_pack(data, &sz, p, size, args.type)==LIBPOTATO_NOT_IMPLEMENTED){
+			dprintf(2, "Unsupported compression type\n");
+			abort();
+		}
+		ftruncate(fd2, sz);
+
+		free(fn);
+	}
+/*
     if(args.unpack){
         struct footer* ft=p+size-sizeof(struct footer);
-        if(memcmp(ft->marker, "DVPL", 4)){
+
+	if(memcmp(ft->marker, "DVPL", 4)){
             dprintf(2, "This is not DVPL!\n");
             abort();
         }
@@ -133,7 +190,11 @@ int main(int argc, char* argv[])
 //        if(ft->packed_len==0){}
 
         char *dot = strrchr(fname, '.');
-        if (dot && !strcmp(dot, ".dvpl")){fname[strlen(fname)-5]=0;}else{fname="orig";}
+        if(dot && !strcmp(dot, ".dvpl")){
+		fname[strlen(fname)-5]=0;
+	}else{
+		fname="orig";
+	}
 
         int fd2;
         if(!(fd2=open(fname, O_RDWR|O_CREAT, 0666))){
@@ -151,23 +212,15 @@ int main(int argc, char* argv[])
             abort();
         }
         switch(ft->pack_type){
-        case 0:
+        case 0://RAW
             memcpy(u, p, ft->len);
             break;
-        case 1:
-        case 2:
+        case 1://LZ4
+        case 2://LZ4HC
             LZ4_decompress_safe(p, u, ft->packed_len, ft->len);
 //            munmap(p, size);
-/*            if(msync(u, ft->len, MS_SYNC)){
-                perror("Msync");
-                abort();
-            }*/
-/*            if(munmap(u, ft->len)){
-                perror("Munmap");
-                abort();
-            }*/
             break;
-        case 4:
+        case 4://ZIP
             dprintf(2, "Deflate not implemented\n");
             abort();
         default:
@@ -183,14 +236,15 @@ int main(int argc, char* argv[])
             memcpy(fn+sz, ".dvpl", 6);
         }
         char* compressed_data;
-        size_t compressed_size;
-        int fd2;
+        size_t compressed_size, max_dst_size;
+        
+	int fd2;
         if(!(fd2=open(fn, O_RDWR|O_CREAT, 0666))){
             dprintf(2, "Fopen error\n");
             abort();
         }
         switch(args.type) {
-        case 0:
+        case 0://RAW
             if(ftruncate(fd2, size+sizeof(struct footer))){
                 perror("Truncate error");
                 abort();
@@ -201,9 +255,9 @@ int main(int argc, char* argv[])
             }
             compressed_data=size;
             memcpy(compressed_data, p, size);
-        case 2:
+        case 2://LZ4HC
         {
-            size_t max_dst_size=LZ4_compressBound(size);
+            max_dst_size=LZ4_compressBound(size);
             if(ftruncate(fd2, max_dst_size)){
                 perror("Truncate error");
                 abort();
@@ -217,11 +271,32 @@ int main(int argc, char* argv[])
                 dprintf(2, "LZ4 compression fail");
                 abort();
             }
-            munmap(compressed_data, max_dst_size);
+//            munmap(compressed_data, max_dst_size);
             ftruncate(fd2, compressed_size+sizeof(struct footer));
-            compressed_data=mmap(NULL, compressed_size+sizeof(struct footer), PROT_WRITE, MAP_SHARED|MAP_FILE, fd2, 0);
+//            compressed_data=mmap(NULL, compressed_size+sizeof(struct footer), PROT_WRITE, MAP_SHARED|MAP_FILE, fd2, 0);
             break;
         }
+	case 1://LZ4
+		max_dst_size=LZ4_compressBound(size);
+
+		if(ftruncate(fd2, max_dst_size)){
+			perror("Truncate error");
+			abort();
+		}
+
+		if((compressed_data=mmap(NULL, max_dst_size, PROT_WRITE, MAP_SHARED|MAP_FILE, fd2, 0))==-1){
+			perror("Mmap");
+			abort();
+		}
+
+		compressed_size=LZ4_compress_default(p, compressed_data, size, max_dst_size);
+		if(compressed_size<=0){
+			dprintf(2, "LZ4 compression fail");
+			abort();
+		}
+
+		ftruncate(fd2, compressed_size+sizeof(struct footer));
+		break;
         default:
             dprintf(2, "Compression type %d is unsupported\n", args.type);
             abort();
@@ -233,6 +308,11 @@ int main(int argc, char* argv[])
         ft->pack_type=2;
         memcpy(ft->marker, "DVPL", 4);
         munmap(compressed_data, compressed_size);
-    }
+	}
+*/
+/*if(msync(u, ft->len, MS_SYNC)){
+					perror("Msync");
+					abort();
+}*/
     return 0;
 }
