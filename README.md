@@ -1,5 +1,5 @@
 ### DVPL
-An utility to repack DVPL files
+An utility to repack WOT_BLITZ DVPL files
 
 #### Building
 ```
